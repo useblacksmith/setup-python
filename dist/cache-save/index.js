@@ -96,11 +96,15 @@ const promiseWithTimeout = (timeoutMs, promise) => __awaiter(void 0, void 0, voi
     });
 });
 function reportFailure() {
+    var _a, _b;
     return __awaiter(this, void 0, void 0, function* () {
         try {
             core.info('Reporting failure to api.blacksmith.sh');
+            const message = `${process.env.GITHUB_JOB} failed for ${process.env.GITHUB_REPOSITORY} with run ID: ${process.env.GITHUB_RUN_ID}; Sender: ${process.env.GITHUB_TRIGGERING_ACTOR}; VM ID: ${(_a = process.env.VM_ID) !== null && _a !== void 0 ? _a : 'unknown'}; petname: ${(_b = process.env.PETNAME) !== null && _b !== void 0 ? _b : 'unknown'}`;
             const httpClient = (0, cacheHttpClient_1.createHttpClient)();
-            yield promiseWithTimeout(10000, httpClient.postJson((0, cacheHttpClient_1.getCacheApiUrl)('report-failed'), {}));
+            yield promiseWithTimeout(10000, httpClient.postJson((0, cacheHttpClient_1.getCacheApiUrl)('report-failed'), {
+                message
+            }));
         }
         catch (error) {
             core.warning('Failed to report failure to api.blacksmith.sh');
@@ -178,9 +182,7 @@ function restoreCache(paths, primaryKey, restoreKeys, options, enableCrossOsArch
         finally {
             // Try to delete the archive to save space
             try {
-                const before = Date.now();
                 yield unlinkWithTimeout(archivePath, 5000);
-                core.info(`cleaning up archive took ${Date.now() - before}ms`);
             }
             catch (error) {
                 core.debug(`Failed to delete archive: ${error}`);
@@ -333,6 +335,9 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.saveCache = exports.reserveCache = exports.downloadCache = exports.getCacheEntry = exports.getCacheVersion = exports.createHttpClient = exports.getCacheApiUrl = void 0;
 const core = __importStar(__nccwpck_require__(7484));
@@ -345,14 +350,20 @@ const utils = __importStar(__nccwpck_require__(680));
 const downloadUtils_1 = __nccwpck_require__(5067);
 const options_1 = __nccwpck_require__(8356);
 const requestUtils_1 = __nccwpck_require__(2846);
+const axios_1 = __importDefault(__nccwpck_require__(7269));
 const versionSalt = '1.0';
 function getCacheApiUrl(resource) {
-    const baseUrl = process.env['BLACKSMITH_CACHE_URL'] || 'https://api.blacksmith.sh/cache';
+    var _a, _b;
+    let baseUrl = process.env.BLACKSMITH_CACHE_URL;
     if (!baseUrl) {
-        throw new Error('Cache Service Url not found, unable to restore cache.');
+        baseUrl = ((_a = process.env.PETNAME) === null || _a === void 0 ? void 0 : _a.includes('staging'))
+            ? 'https://stagingapi.blacksmith.sh/cache'
+            : 'https://api.blacksmith.sh/cache';
     }
     const url = `${baseUrl}/${resource}`;
-    core.debug(`Blacksmith cache resource URL: ${url}; version: 3.2.40`);
+    if ((_b = process.env.PETNAME) === null || _b === void 0 ? void 0 : _b.includes('staging')) {
+        core.info(`Using staging API: ${url}`);
+    }
     return url;
 }
 exports.getCacheApiUrl = getCacheApiUrl;
@@ -393,31 +404,65 @@ function getCacheVersion(paths, compressionMethod, enableCrossOsArchive = false)
 exports.getCacheVersion = getCacheVersion;
 function getCacheEntry(keys, paths, options) {
     return __awaiter(this, void 0, void 0, function* () {
-        const httpClient = createHttpClient();
         const version = getCacheVersion(paths, options === null || options === void 0 ? void 0 : options.compressionMethod, options === null || options === void 0 ? void 0 : options.enableCrossOsArchive);
         const resource = `?keys=${encodeURIComponent(keys.join(','))}&version=${version}`;
-        const response = yield (0, requestUtils_1.retryTypedResponse)('getCacheEntry', () => __awaiter(this, void 0, void 0, function* () { return httpClient.getJson(getCacheApiUrl(resource)); }));
-        // Cache not found
-        if (response.statusCode === 204) {
-            // List cache for primary key only if cache miss occurs
-            if (core.isDebug()) {
-                yield printCachesListForDiagnostics(keys[0], httpClient, version);
+        const maxRetries = 2;
+        let retries = 0;
+        core.info(`Checking cache for keys ${keys.join(',')} and version ${version}`);
+        while (retries <= maxRetries) {
+            try {
+                const before = Date.now();
+                const response = yield axios_1.default.get(getCacheApiUrl(resource), {
+                    headers: {
+                        Accept: createAcceptHeader('application/json', '6.0-preview.1'),
+                        'X-Github-Repo-Name': process.env['GITHUB_REPO_NAME'],
+                        Authorization: `Bearer ${process.env['BLACKSMITH_CACHE_TOKEN']}`
+                    },
+                    timeout: 10000 // 10 seconds timeout
+                });
+                core.debug(`Cache lookup took ${Date.now() - before}ms`);
+                // Cache not found
+                if (response.status === 204) {
+                    // List cache for primary key only if cache miss occurs
+                    if (core.isDebug()) {
+                        yield printCachesListForDiagnostics(keys[0], createHttpClient(), version);
+                    }
+                    return null;
+                }
+                if (response.status < 200 || response.status >= 300) {
+                    throw new Error(`Cache service responded with ${response.status}`);
+                }
+                const cacheResult = response.data;
+                const cacheDownloadUrl = cacheResult === null || cacheResult === void 0 ? void 0 : cacheResult.archiveLocation;
+                if (!cacheDownloadUrl) {
+                    // Cache archiveLocation not found. This should never happen, and hence bail out.
+                    throw new Error('Cache not found.');
+                }
+                core.setSecret(cacheDownloadUrl);
+                core.debug(`Cache Result:`);
+                core.debug(JSON.stringify(cacheResult));
+                return cacheResult;
             }
-            return null;
+            catch (error) {
+                if (error.response &&
+                    error.response.status >= 500 &&
+                    retries < maxRetries) {
+                    retries++;
+                    core.warning(`Retrying due to server error (attempt ${retries} of ${maxRetries})`);
+                    continue;
+                }
+                if (error.response) {
+                    throw new Error(`Cache service responded with ${error.response.status}`);
+                }
+                else if (error.code === 'ECONNABORTED') {
+                    throw new Error('Request timed out after 10 seconds');
+                }
+                else {
+                    throw error;
+                }
+            }
         }
-        if (!(0, requestUtils_1.isSuccessStatusCode)(response.statusCode)) {
-            throw new Error(`Cache service responded with ${response.statusCode}`);
-        }
-        const cacheResult = response.result;
-        const cacheDownloadUrl = cacheResult === null || cacheResult === void 0 ? void 0 : cacheResult.archiveLocation;
-        if (!cacheDownloadUrl) {
-            // Cache achiveLocation not found. This should never happen, and hence bail out.
-            throw new Error('Cache not found.');
-        }
-        core.setSecret(cacheDownloadUrl);
-        core.debug(`Cache Result:`);
-        core.debug(JSON.stringify(cacheResult));
-        return cacheResult;
+        throw new Error(`Failed to get cache entry after ${maxRetries} retries`);
     });
 }
 exports.getCacheEntry = getCacheEntry;
@@ -1061,12 +1106,25 @@ function downloadCacheAxiosMultiPart(archiveLocation, archivePath) {
         });
         try {
             core.debug(`Downloading from ${archiveLocation} to ${archivePath}`);
-            const metadataResponse = yield axios_1.default.get(archiveLocation, {
-                headers: { Range: 'bytes=0-1' }
-            });
-            const contentRangeHeader = metadataResponse.headers['content-range'];
+            let metadataResponse;
+            let contentRangeHeader;
+            let retries = 0;
+            const maxRetries = 2;
+            while (retries <= maxRetries) {
+                metadataResponse = yield axios_1.default.get(archiveLocation, {
+                    headers: { Range: 'bytes=0-1' }
+                });
+                contentRangeHeader = metadataResponse.headers['content-range'];
+                if (contentRangeHeader) {
+                    break;
+                }
+                retries++;
+                if (retries <= maxRetries) {
+                    core.debug(`Content-Range header not found. Retrying (${retries}/${maxRetries})...`);
+                }
+            }
             if (!contentRangeHeader) {
-                throw new Error('Content-Range is not defined; unable to determine file size');
+                throw new Error('Content-Range is not defined after retries; unable to determine file size');
             }
             // Parse the total file size from the Content-Range header
             const fileSize = parseInt(contentRangeHeader.split('/')[1]);
@@ -1244,7 +1302,6 @@ exports.downloadCacheHttpClient = downloadCacheHttpClient;
 function downloadCacheHttpClientConcurrent(archiveLocation, archivePath, options) {
     var _a;
     return __awaiter(this, void 0, void 0, function* () {
-        core.info('Downloading from cache using Blacksmith Actions http-client');
         const archiveDescriptor = yield fs.promises.open(archivePath, 'w+');
         // Set file permissions so that other users can untar the cache
         yield archiveDescriptor.chmod(0o644);
@@ -1259,19 +1316,34 @@ function downloadCacheHttpClientConcurrent(archiveLocation, archivePath, options
         }, 300000);
         stallTimeout.unref(); // Don't keep the process alive if the download is stalled.
         try {
-            const metadataResponse = yield (0, requestUtils_1.retryHttpClientResponse)('downloadCache', () => __awaiter(this, void 0, void 0, function* () {
-                return httpClient.get(archiveLocation, {
-                    Range: 'bytes=0-1'
+            let metadataResponse;
+            let contentRangeHeader;
+            let retries = 0;
+            const maxRetries = 2;
+            while (retries <= maxRetries) {
+                metadataResponse = yield (0, requestUtils_1.retryHttpClientResponse)('downloadCache', () => __awaiter(this, void 0, void 0, function* () {
+                    return httpClient.get(archiveLocation, {
+                        Range: 'bytes=0-1'
+                    });
+                }));
+                // Abort download if no traffic received over the socket.
+                metadataResponse.message.socket.setTimeout(constants_1.SocketTimeout, () => {
+                    metadataResponse.message.destroy();
+                    core.debug(`Aborting download, socket timed out after ${constants_1.SocketTimeout} ms`);
                 });
-            }));
-            // Abort download if no traffic received over the socket.
-            metadataResponse.message.socket.setTimeout(constants_1.SocketTimeout, () => {
-                metadataResponse.message.destroy();
-                core.debug(`Aborting download, socket timed out after ${constants_1.SocketTimeout} ms`);
-            });
-            const contentRangeHeader = metadataResponse.message.headers['content-range'];
+                contentRangeHeader = metadataResponse.message.headers['content-range'];
+                if (contentRangeHeader) {
+                    break;
+                }
+                retries++;
+                if (retries <= maxRetries) {
+                    core.debug(`Content-Range header not found. Retrying (${retries}/${maxRetries})...`);
+                }
+            }
             if (!contentRangeHeader) {
-                throw new Error('Content-Range is not defined; unable to determine file size');
+                const headers = JSON.stringify(metadataResponse.message.headers);
+                const statusCode = metadataResponse.message.statusCode;
+                throw new Error(`Content-Range is not defined; unable to determine file size; Headers: ${headers}; Status Code: ${statusCode}`);
             }
             // Parse the total file size from the Content-Range header
             const length = parseInt(contentRangeHeader.split('/')[1]);
@@ -1281,7 +1353,7 @@ function downloadCacheHttpClientConcurrent(archiveLocation, archivePath, options
             progress = new DownloadProgress(length);
             progress.startDisplayTimer();
             const downloads = [];
-            const blockSize = 3 * 1024 * 1024;
+            const blockSize = 2 * 1024 * 1024;
             for (let offset = 0; offset < length; offset += blockSize) {
                 const count = Math.min(blockSize, length - offset);
                 downloads.push({
@@ -1312,7 +1384,7 @@ function downloadCacheHttpClientConcurrent(archiveLocation, archivePath, options
             while ((nextDownload = downloads.pop())) {
                 activeDownloads[nextDownload.offset] = nextDownload.promiseGetter();
                 actives++;
-                if (actives >= ((_a = options.downloadConcurrency) !== null && _a !== void 0 ? _a : 10)) {
+                if (actives >= ((_a = options.downloadConcurrency) !== null && _a !== void 0 ? _a : 12)) {
                     yield waitAndWrite();
                 }
             }
@@ -1334,11 +1406,11 @@ function downloadCacheHttpClientConcurrent(archiveLocation, archivePath, options
 exports.downloadCacheHttpClientConcurrent = downloadCacheHttpClientConcurrent;
 function downloadSegmentRetry(httpClient, archiveLocation, offset, count) {
     return __awaiter(this, void 0, void 0, function* () {
-        const retries = 3;
+        const retries = 5;
         let failures = 0;
         while (true) {
             try {
-                const timeout = 10000;
+                const timeout = 15000;
                 const result = yield promiseWithTimeout(timeout, downloadSegment(httpClient, archiveLocation, offset, count));
                 if (typeof result === 'string') {
                     throw new Error('downloadSegmentRetry failed due to timeout');
@@ -1351,7 +1423,7 @@ function downloadSegmentRetry(httpClient, archiveLocation, offset, count) {
                 }
                 failures++;
                 // Jitter a bit before retrying
-                yield new Promise(resolve => setTimeout(resolve, Math.random() * 1000));
+                yield new Promise(resolve => setTimeout(resolve, Math.random() * 300));
                 core.info(`Retrying download segment ${offset} of ${count} (${failures} of ${retries})`);
             }
         }
@@ -1556,9 +1628,12 @@ function retry(name, method, getStatusCode, maxAttempts = constants_1.DefaultRet
                 isRetryable = isRetryableStatusCode(statusCode);
                 errorMessage = `Cache service responded with ${statusCode}`;
             }
+            if (!statusCode) {
+                isRetryable = true;
+            }
             core.debug(`${name} - Attempt ${attempt} of ${maxAttempts} failed with error: ${errorMessage}`);
             if (!isRetryable) {
-                core.debug(`${name} - Error is not retryable`);
+                core.warning(`${name} - Error is not retryable; Status Code: ${statusCode}; Error: ${errorMessage}`);
                 break;
             }
             yield sleep(delay);
@@ -1687,11 +1762,14 @@ function getTarPath() {
 }
 // Return arguments for tar as per tarPath, compressionMethod, method type and os
 function getTarArgs(tarPath, compressionMethod, type, archivePath = '') {
+    var _a, _b;
     return __awaiter(this, void 0, void 0, function* () {
         const args = [`"${tarPath.path}"`];
         const cacheFileName = utils.getCacheFileName(compressionMethod);
         const tarFile = 'cache.tar';
         const workingDirectory = getWorkingDirectory();
+        const shouldSkipOldFiles = ((_a = process.env['GITHUB_REPOSITORY']) === null || _a === void 0 ? void 0 : _a.includes('muzzapp')) ||
+            ((_b = process.env['GITHUB_REPOSITORY']) === null || _b === void 0 ? void 0 : _b.includes('FastActions'));
         // Speficic args for BSD tar on windows for workaround
         const BSD_TAR_ZSTD = tarPath.type === constants_1.ArchiveToolType.BSD &&
             compressionMethod !== constants_1.CompressionMethod.Gzip &&
@@ -1706,9 +1784,12 @@ function getTarArgs(tarPath, compressionMethod, type, archivePath = '') {
                     : cacheFileName.replace(new RegExp(`\\${path.sep}`, 'g'), '/'), '-P', '-C', workingDirectory.replace(new RegExp(`\\${path.sep}`, 'g'), '/'), '--files-from', constants_1.ManifestFilename);
                 break;
             case 'extract':
-                args.push('--skip-old-files', '-xf', BSD_TAR_ZSTD
+                args.push('-xf', BSD_TAR_ZSTD
                     ? tarFile
                     : archivePath.replace(new RegExp(`\\${path.sep}`, 'g'), '/'), '-P', '-C', workingDirectory.replace(new RegExp(`\\${path.sep}`, 'g'), '/'));
+                if (shouldSkipOldFiles) {
+                    args.push('--skip-old-files');
+                }
                 break;
             case 'list':
                 args.push('-tf', BSD_TAR_ZSTD
