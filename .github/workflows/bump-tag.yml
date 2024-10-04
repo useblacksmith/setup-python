@@ -1,0 +1,32 @@
+name: Bump Tags on Main
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  bump-tags:
+    runs-on: blacksmith
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update v6 tag
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git tag -fa v6 -m "Update v6 tag to latest commit on main"
+          git push origin v6 --force
+
+      - name: Send Slack notification on success
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "Updated setup-python v6 tag to the latest commit on main"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.CACHE_SLACK_WEBHOOK_URL }}
