@@ -365,9 +365,6 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.saveCache = exports.reserveCache = exports.downloadCache = exports.getCacheEntry = exports.getCacheEntryUsingCacheMgr = exports.downloadBlobUsingCacheMgr = exports.waitForArchiveToBeAvailable = exports.mountSharedNFSVolume = exports.getCacheVersion = exports.createHttpClient = exports.getCacheApiUrl = void 0;
 const core = __importStar(__nccwpck_require__(2186));
@@ -380,12 +377,8 @@ const utils = __importStar(__nccwpck_require__(1518));
 const downloadUtils_1 = __nccwpck_require__(5500);
 const options_1 = __nccwpck_require__(6215);
 const requestUtils_1 = __nccwpck_require__(3981);
-<<<<<<< HEAD
 const axios_1 = __importStar(__nccwpck_require__(8757));
 const child_process_1 = __nccwpck_require__(2081);
-=======
-const axios_1 = __importDefault(__nccwpck_require__(8757));
->>>>>>> 86f6ba1 (Bump @actions/cache version to 3.2.158)
 const versionSalt = '1.0';
 function getCacheApiUrl(resource) {
     var _a, _b;
@@ -577,11 +570,7 @@ function getCacheEntry(keys, paths, options) {
     return __awaiter(this, void 0, void 0, function* () {
         const version = getCacheVersion(paths, options === null || options === void 0 ? void 0 : options.compressionMethod, options === null || options === void 0 ? void 0 : options.enableCrossOsArchive);
         const resource = `?keys=${encodeURIComponent(keys.join(','))}&version=${version}`;
-<<<<<<< HEAD
         const maxRetries = 3;
-=======
-        const maxRetries = 2;
->>>>>>> 86f6ba1 (Bump @actions/cache version to 3.2.158)
         let retries = 0;
         core.info(`Checking cache for keys ${keys.join(',')} and version ${version}`);
         while (retries <= maxRetries) {
@@ -591,16 +580,10 @@ function getCacheEntry(keys, paths, options) {
                     headers: {
                         Accept: createAcceptHeader('application/json', '6.0-preview.1'),
                         'X-Github-Repo-Name': process.env['GITHUB_REPO_NAME'],
-<<<<<<< HEAD
                         Authorization: `Bearer ${process.env['BLACKSMITH_CACHE_TOKEN']}`,
                         'X-Cache-Region': (_a = process.env['BLACKSMITH_REGION']) !== null && _a !== void 0 ? _a : 'eu-central'
                     },
                     timeout: 3000 // 3 seconds timeout
-=======
-                        Authorization: `Bearer ${process.env['BLACKSMITH_CACHE_TOKEN']}`
-                    },
-                    timeout: 10000 // 10 seconds timeout
->>>>>>> 86f6ba1 (Bump @actions/cache version to 3.2.158)
                 });
                 core.debug(`Cache lookup took ${Date.now() - before}ms`);
                 // Cache not found
@@ -626,7 +609,6 @@ function getCacheEntry(keys, paths, options) {
                 return cacheResult;
             }
             catch (error) {
-<<<<<<< HEAD
                 if ((error.response && error.response.status >= 500) ||
                     error.code === 'ECONNABORTED') {
                     retries++;
@@ -639,24 +621,12 @@ function getCacheEntry(keys, paths, options) {
                         }
                         continue;
                     }
-=======
-                if (error.response &&
-                    error.response.status >= 500 &&
-                    retries < maxRetries) {
-                    retries++;
-                    core.warning(`Retrying due to server error (attempt ${retries} of ${maxRetries})`);
-                    continue;
->>>>>>> 86f6ba1 (Bump @actions/cache version to 3.2.158)
                 }
                 if (error.response) {
                     throw new Error(`Cache service responded with ${error.response.status}`);
                 }
                 else if (error.code === 'ECONNABORTED') {
-<<<<<<< HEAD
                     throw new Error('Request timed out after 3 seconds');
-=======
-                    throw new Error('Request timed out after 10 seconds');
->>>>>>> 86f6ba1 (Bump @actions/cache version to 3.2.158)
                 }
                 else {
                     throw error;
